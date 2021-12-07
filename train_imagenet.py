@@ -75,7 +75,9 @@ def main():
 
     # create model
     if args.arch == "resnet":
-        model = ResidualNet( 'ImageNet', args.depth, 1000, args.att_type )
+        model = ResidualNet('ImageNet', args.depth, 1000, args.att_type)
+    elif args.arch == 'resnet_plus1':
+        model = ResidualNetPlus1('ImageNet', args.depth, 1000, args.att_type)
 
     # define loss function (criterion) and optimizer
     criterion = nn.CrossEntropyLoss().cuda()
@@ -101,7 +103,7 @@ def main():
             checkpoint = torch.load(args.resume)
             args.start_epoch = checkpoint['epoch'] if checkpoint['epoch'] > -1 else 0
             best_prec1 = checkpoint['best_prec1']
-            model.load_state_dict(checkpoint['state_dict'])
+            model.load_state_dict(checkpoint['state_dict'], strict=False)
             if 'optimizer' in checkpoint:
                 optimizer.load_state_dict(checkpoint['optimizer'])
             print("=> loaded checkpoint '{}' (epoch {})"
