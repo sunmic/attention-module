@@ -15,6 +15,9 @@ import torchvision.datasets as datasets
 import torchvision.models as models
 from MODELS.model_resnet import *
 from PIL import ImageFile
+
+from torch.utils.tensorboard import SummaryWriter
+
 ImageFile.LOAD_TRUNCATED_IMAGES = True
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
@@ -64,6 +67,8 @@ def main():
     args = parser.parse_args()
     print ("args", args)
 
+    writer = SummaryWriter()
+
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
     random.seed(args.seed)
@@ -80,9 +85,10 @@ def main():
                             weight_decay=args.weight_decay)
     model = torch.nn.DataParallel(model, device_ids=list(range(args.ngpu)))
     #model = torch.nn.DataParallel(model).cuda()
-    model = model.cuda()
-    print ("model")
-    print (model)
+    with torch.autocast("cuda", enabled=True):
+        model = model.cuda()
+    print("model")
+    print(model)
 
     # get the number of model parameters
     print('Number of model parameters: {}'.format(
@@ -93,7 +99,7 @@ def main():
         if os.path.isfile(args.resume):
             print("=> loading checkpoint '{}'".format(args.resume))
             checkpoint = torch.load(args.resume)
-            args.start_epoch = checkpoint['epoch']
+            args.start_epoch = checkpoint['epoch'] if checkpoint['epoch'] > -1 else 0
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
             if 'optimizer' in checkpoint:
@@ -116,7 +122,7 @@ def main():
     # pdb.set_trace()
     val_loader = torch.utils.data.DataLoader(
         datasets.ImageFolder(valdir, transforms.Compose([
-                transforms.Scale(256),
+                transforms.Resize(256),  # The use of the transforms.Scale transform is deprecated, please use transforms.Resize instead.
                 transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 normalize,
@@ -124,13 +130,13 @@ def main():
             batch_size=args.batch_size, shuffle=False,
            num_workers=args.workers, pin_memory=True)
     if args.evaluate:
-        validate(val_loader, model, criterion, 0)
+        validate(val_loader, model, criterion, 0, writer)
         return
 
     train_dataset = datasets.ImageFolder(
         traindir,
         transforms.Compose([
-            transforms.RandomSizedCrop(224),
+            transforms.RandomResizedCrop(224),  # The use of the transforms.RandomSizedCrop transform is deprecated, please use transforms.RandomResizedCrop instead.
             transforms.RandomHorizontalFlip(),
             transforms.ToTensor(),
             normalize,
@@ -146,10 +152,10 @@ def main():
         adjust_learning_rate(optimizer, epoch)
         
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch)
+        train(train_loader, model, criterion, optimizer, epoch, writer)
         
         # evaluate on validation set
-        prec1 = validate(val_loader, model, criterion, epoch)
+        prec1 = validate(val_loader, model, criterion, epoch, writer)
         
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
@@ -163,7 +169,7 @@ def main():
         }, is_best, args.prefix)
 
 
-def train(train_loader, model, criterion, optimizer, epoch):
+def train(train_loader, model, criterion, optimizer, epoch, writer):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -177,21 +183,22 @@ def train(train_loader, model, criterion, optimizer, epoch):
     for i, (input, target) in enumerate(train_loader):
         # measure data loading time
         data_time.update(time.time() - end)
-        
-        target = target.cuda(non_blocking=True)
-        input_var = torch.autograd.Variable(input)
-        target_var = torch.autograd.Variable(target)
-        
-        # compute output
-        output = model(input_var)
-        loss = criterion(output, target_var)
-        
+
+        with torch.autocast("cuda", enabled=True):
+            target = target.cuda(non_blocking=True)
+            input_var = torch.autograd.Variable(input)
+            target_var = torch.autograd.Variable(target)
+
+            # compute output
+            output = model(input_var)
+            loss = criterion(output, target_var)
+
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        losses.update(loss.data[0], input.size(0))
+        losses.update(loss.data, input.size(0))
         top1.update(prec1[0], input.size(0))
         top5.update(prec5[0], input.size(0))
-        
+
         # compute gradient and do SGD step
         optimizer.zero_grad()
         loss.backward()
@@ -211,7 +218,13 @@ def train(train_loader, model, criterion, optimizer, epoch):
                    epoch, i, len(train_loader), batch_time=batch_time,
                    data_time=data_time, loss=losses, top1=top1, top5=top5))
 
-def validate(val_loader, model, criterion, epoch):
+    writer.add_scalar("Time/train", batch_time.avg, epoch)
+    writer.add_scalar("Data/train", data_time.avg, epoch)
+    writer.add_scalar("Loss/train", losses.avg, epoch)
+    writer.add_scalar("Prec@1/train", top1.avg, epoch)
+    writer.add_scalar("Prec@5/train", top5.avg, epoch)
+
+def validate(val_loader, model, criterion, epoch, writer):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -222,17 +235,18 @@ def validate(val_loader, model, criterion, epoch):
 
     end = time.time()
     for i, (input, target) in enumerate(val_loader):
-        target = target.cuda(non_blocking=True)
-        input_var = torch.autograd.Variable(input, volatile=True)
-        target_var = torch.autograd.Variable(target, volatile=True)
-        
-        # compute output
-        output = model(input_var)
-        loss = criterion(output, target_var)
+        with torch.autocast("cuda", enabled=True):
+            target = target.cuda(non_blocking=True)
+            input_var = torch.autograd.Variable(input, volatile=True)
+            target_var = torch.autograd.Variable(target, volatile=True)
+
+            # compute output
+            output = model(input_var)
+            loss = criterion(output, target_var)
         
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
-        losses.update(loss.data[0], input.size(0))
+        losses.update(loss.data, input.size(0))
         top1.update(prec1[0], input.size(0))
         top5.update(prec5[0], input.size(0))
         
@@ -248,6 +262,12 @@ def validate(val_loader, model, criterion, epoch):
                   'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
                    i, len(val_loader), batch_time=batch_time, loss=losses,
                    top1=top1, top5=top5))
+
+    writer.add_scalar("Time/val", batch_time.avg, epoch)
+    # writer.add_scalar("Data/val", data_time.avg, epoch)
+    writer.add_scalar("Loss/val", losses.avg, epoch)
+    writer.add_scalar("Prec@1/val", top1.avg, epoch)
+    writer.add_scalar("Prec@5/val", top5.avg, epoch)
     
     print(' * Prec@1 {top1.avg:.3f} Prec@5 {top5.avg:.3f}'
             .format(top1=top1, top5=top5))
@@ -298,10 +318,13 @@ def accuracy(output, target, topk=(1,)):
 
     res = []
     for k in topk:
-        correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+        correct_k = correct[:k].contiguous().view(-1).float().sum(0, keepdim=True)
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
 
 if __name__ == '__main__':
+    # from clearml import Task
+    # task = Task.init(project_name='attention-explanation',
+    #                  task_name=f'attention-module_train_imagenet')
     main()
