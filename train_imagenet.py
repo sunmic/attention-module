@@ -237,14 +237,18 @@ def validate(val_loader, model, criterion, epoch, writer):
 
     end = time.time()
     for i, (input, target) in enumerate(val_loader):
-        with torch.autocast("cuda", enabled=True):
-            target = target.cuda(non_blocking=True)
-            input_var = torch.autograd.Variable(input, volatile=True)
-            target_var = torch.autograd.Variable(target, volatile=True)
+        with torch.no_grad():
+            with torch.autocast("cuda", enabled=True):
+                target = target.cuda(non_blocking=True)
+                # volatile was removed and now has no effect. Use `with torch.no_grad():` instead.
+                # input_var = torch.autograd.Variable(input, volatile=True)
+                # target_var = torch.autograd.Variable(target, volatile=True)
+                input_var = torch.autograd.Variable(input)
+                target_var = torch.autograd.Variable(target)
 
-            # compute output
-            output = model(input_var)
-            loss = criterion(output, target_var)
+                # compute output
+                output = model(input_var)
+                loss = criterion(output, target_var)
         
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1, 5))
@@ -326,7 +330,7 @@ def accuracy(output, target, topk=(1,)):
 
 
 if __name__ == '__main__':
-    # from clearml import Task
-    # task = Task.init(project_name='attention-explanation',
-    #                  task_name=f'attention-module_train_imagenet')
+    from clearml import Task
+    task = Task.init(project_name='attention-explanation',
+                     task_name=f'CBAMResNet50Plus1 from ResNet checkpoint')
     main()
